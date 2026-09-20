@@ -14,6 +14,9 @@ const COMP_TAGS = [
   "cart-shop-group",
   "search-nav-bar",
   "products-sidebar",
+  "profile-tab",
+  "profile-member-card",
+  "profile-section-card",
 ];
 
 function sleep(ms) {

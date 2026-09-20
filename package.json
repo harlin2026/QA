@@ -3,6 +3,8 @@
   "private": true,
   "description": "aChill Club 小程序页面流程自动化（miniprogram-automator）",
   "scripts": {
+    "start": "node ui/server.js",
+    "ui": "node ui/server.js",
     "test": "node run.js"
   },
   "engines": {

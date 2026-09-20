@@ -1,6 +1,6 @@
 # aChill Club 小程序 QA 自動化 — 架構設計說明
 
-本文件依目前程式與技術棧整理，說明 `achill-miniprogram-automator` 如何驅動 aChill Club（Peterson）微信小程序，跑完登入到結算頁的 E2E happy path。
+本文件依目前程式與技術棧整理，說明 `achill-miniprogram-automator` 如何驅動 aChill Club（Peterson）微信小程序，跑完登入、選店、加購、支付、訂單到會員中心的 E2E happy path。
 
 被測小程序原始碼不在本 repo，預設編譯產物由 `config.json` 的 `projectPath` 指向：
 
@@ -18,12 +18,12 @@
 
 | 目標 | 作法 |
 |------|------|
-| 穩定重跑「登入 → 選店 → 加購 → 結算」 | 單一編排出口 `runFlow`，步驟失敗即 `throw` |
+| 穩定重跑「登入 → 選店 → 加購 → 支付 → 訂單 → 會員中心」 | 單一編排出口 `runFlow`，步驟失敗即 `throw` |
 | 同時打穿小程序邏輯層與原生彈窗 | Automator 操作頁面；Win32 / Python 點「允許」 |
 | 結束後不關掉開發者工具 | 只 `disconnect` WebSocket |
 | 本機路徑可改、業務常量集中 | `config.json` 管路徑與埠；`src/config.js` 管 QA URL、頁面 path、目標店 |
 
-範圍到 `pages/settlement/index` 為止，**不走微信支付**。
+範圍到 `pages/member-center/index`。開發者工具無法真實微信支付，因此 `wx.requestPayment` 會被 mock 為成功；若後端輪詢仍未確認，則呼叫小程序的 `confirmOrderPaySuccess` 作為補償。
 
 ---
 
@@ -167,15 +167,16 @@ sequenceDiagram
   Run->>Flow: runFlow(miniProgram)
   Flow->>MP: evaluate / tap / reLaunch
   Flow->>Nat: clickAllowInSimulator
-  MP->>API: wx.request 登入 / 購物車
-  Flow->>MP: 選店、加購、結算
-  Flow-->>Run: 進入 settlement + finish_delay
+  MP->>API: wx.request 登入 / 購物車 / 下單 / 標支付成功
+  Flow->>MP: 選店、加購、結算支付
+  Flow->>MP: 支付成功 → 訂單 → 會員中心
+  Flow-->>Run: 流程結束 + finish_delay
   Run->>Sess: disconnectQuietly
 ```
 
 ---
 
-## 7. 業務流程（12 步）
+## 7. 業務流程（17 步）
 
 `runFlow` 實際呼叫順序：
 
@@ -192,7 +193,14 @@ sequenceDiagram
 | 9 | `chooseStore` | 鎖定「aChill Club澳门直营店」 |
 | 10 | `addProduct` | 加 2–3 件 |
 | 11 | `openCart` | 開購物車 |
-| 12 | `verifyCartAndCheckout` | 勾選並進結算頁，不支付，再等 `finish_delay`（預設 15 秒） |
+| 12 | `verifyCartAndCheckout` | 勾選並進結算頁 |
+| 13 | `payOnSettlement` | 補電話 / 自提時間、mock 支付、提交訂單 |
+| 14 | `verifyPaymentSuccess` | 確認支付成功頁 |
+| 15 | `viewOrderAfterPay` | 「查看订单」進訂單詳情 |
+| 16 | `verifyOrderList` | 訂單列表切「全部」並打開一張訂單 |
+| 17 | `openMemberCenter` | 「我的」Tab → 會員中心 |
+
+結束後再等 `finish_delay`（預設 15 秒）。
 
 ---
 
@@ -217,14 +225,14 @@ sequenceDiagram
 | `cliPath` | 微信開發者工具 `cli.bat` |
 | `projectPath` | 小程序編譯目錄 |
 | `test_port` | 自動化埠（預設 9420） |
-| `finish_delay` | 結算頁停留秒數 |
+| `finish_delay` | 整條流程結束後停留秒數 |
 
 別名：`dev_tool_path`、`project_path`。
 
 **業務常量（`src/config.js` 硬編碼）**
 
-- `qaApi`、`preferredStore` / `preferredHints`
-- `pages.login | home | storeList | storeSearch | settlement`
+- `qaApi`、`qaPhone`、`preferredStore` / `preferredHints`
+- `pages.login | home | storeList | storeSearch | settlement | paymentSuccess | orderList | orderDetail | memberCenter`
 
 沒有 `.env` 或 secrets 檔；token 來自執行期小程序 storage。
 
@@ -237,7 +245,7 @@ sequenceDiagram
 3. **授權多層 fallback** — 視覺 → UIA → 比例座標
 4. **自訂組件遍歷** — 模擬 shadow / 宿主穿透
 5. **可觀測 hook** — console 解析 `PHONE_EVENT` / `WX_RESP`
-6. **補償交易** — UI 成功、token 未寫入時走 API 補登
+6. **補償交易** — UI 成功、token 未寫入時走 API 補登；支付輪詢失敗時走 `confirmOrderPaySuccess`
 7. **輪詢重試** — `waitUntil`、選店滾動 / VM / 搜尋多策略
 
 ---
@@ -246,12 +254,15 @@ sequenceDiagram
 
 | 項目 | 現況 |
 |------|------|
-| 形態 | 本機 CLI，單次執行 |
+| 形態 | 本機 CLI，或 `npm start` 開控制台 UI |
 | OS | **僅 Windows** |
 | 前置 | Node 18+、開發者工具開「服務端口」、小程序已編譯、建議先點一次「編譯」 |
 | CI | 未配置；依賴 GUI 模擬器，不適合無頭環境 |
 | 測試 | 無單元測試目錄；斷言即流程中的 `throw` |
-| 範圍 | 到結算頁為止，不含支付 |
+| 範圍 | 登入到會員中心；微信支付在開發者工具內 mock |
+| 控制台 | `npm start` → http://127.0.0.1:3780 ，選線路並以 SSE 即時看 log |
+
+啟動 UI 後可選「從頭跑到此」或「只測這一段」。CLI 等價寫法：`node run.js --route=settlement`。
 
 ---
 
@@ -269,13 +280,18 @@ sequenceDiagram
 | `pages/index/index?tab=cart` | 同上，`currentTab = cart` | `openCartPage` | 購物車勾選與結算 |
 | `pages/store-list/index` | `src/pages/store-list/index.vue` | `config.pages.storeList`、`openStoreList` | 找澳門直營店 |
 | `pages/store-search/index` | `src/pages/store-search/index.vue` | `config.pages.storeSearch`、`searchPreferredStore` | 列表找不到店時搜尋 |
-| `pages/settlement/index` | `src/pages/settlement/index.vue` | `config.pages.settlement`、`verifyCartAndCheckout` | 流程終點（不支付） |
+| `pages/settlement/index` | `src/pages/settlement/index.vue` | `config.pages.settlement`、`verifyCartAndCheckout`、`payOnSettlement` | 填電話、選自提時間、提交支付 |
+| `pages/payment-success/index` | `src/pages/payment-success/index.vue` | `config.pages.paymentSuccess`、`verifyPaymentSuccess` | 確認支付成功、查看訂單 |
+| `pages/order-detail/index` | `src/pages/order-detail/index.vue` | `config.pages.orderDetail`、`viewOrderAfterPay` | 核對剛下的訂單內容 |
+| `pages/order-list/index` | `src/pages/order-list/index.vue` | `config.pages.orderList`、`verifyOrderList` | 切「全部」並打開一張訂單 |
+| `pages/index/index?tab=profile` | 同上，`currentTab = profile` | `openMemberCenter` | 「我的」入口 |
+| `pages/member-center/index` | `src/pages/member-center/index.vue` | `config.pages.memberCenter`、`openMemberCenter` | 會員權益 / 成長任務 |
 
 登入成功後，小程序 `navigateAfterLogin` 可能 `reLaunch` 門店列表或 `redirectTo` 首頁；QA 會再主動進門店列表以鎖定目標店。
 
 ### 12.2 本流程未覆蓋、但存在於小程序的頁面
 
-`product-details`、`product-search`、`member-center`、`order-list`、`order-detail`、`payment-success`、`coupon-list`、`balance`、`profile-info`、`settings`、`agreement/user`、`agreement/privacy` 等。結算之後的支付成功頁不在自動化範圍。
+`product-details`、`product-search`、`coupon-list`、`balance`、`profile-info`、`settings`、`agreement/user`、`agreement/privacy`、`refund-detail` 等。真實微信支付與退款流程不在自動化範圍。
 
 ### 12.3 組件標籤 ↔ Vue 檔 ↔ QA 用途
 
@@ -296,8 +312,11 @@ sequenceDiagram
 | `bottom-tabbar` | `components/common/BottomTabbar.vue` | `pages/index` | `.tab-item` / `.tab-text` 切 Tab |
 | `store-list-item` | `components/store/StoreListItem.vue` | store-list / store-search | 門店卡片 `.store-card` |
 | `search-nav-bar` | `components/common/SearchNavBar.vue` | 多頁頂欄 | 搜尋入口 |
+| `profile-tab` | `components/profile/ProfileTab.vue` | `pages/index` | 「我的」入口、訂單入口 |
+| `profile-member-card` | `components/profile/ProfileMemberCard.vue` | ProfileTab | 點會員卡進會員中心 |
+| `profile-section-card` | `components/profile/ProfileSectionCard.vue` | ProfileTab | 「查看全部订单」 |
 
-首頁殼層還有 `ProfileTab.vue`，本流程不操作「我的」。
+首頁殼層的「我的」由步驟 17 操作。
 
 ### 12.4 選擇器 / 文案 ↔ 小程序 DOM
 
@@ -318,6 +337,13 @@ sequenceDiagram
 | `.add-cart`、`加入购物车` | `ProductPurchasePopup.vue` | `waitAddCartButton` |
 | `.check-wrap` / `.check-circle` / `.check-mark` | 購物車勾選 | `clickCartCheckbox` |
 | `结算`、`.action-btn`、`总价` | `CartSummaryBar.vue` | `clickCartSettle` |
+| `.submit-btn`、文字 `支付` | `settlement/index.vue` 底欄 | `clickSettlementPay` |
+| `继续下单` | 首單取單時效彈窗 | `prepareSettlement` |
+| `查看订单`、`.order-btn` | `payment-success/index.vue` | `viewOrderAfterPay` |
+| `.order-card`、`全部` | `order-list/index.vue` | `verifyOrderList` |
+| `取单码` / `自取时间` / `.product-item` | `order-detail/index.vue` | 核對詳情內容 |
+| `.member-card` / `.member-top`、`会员` | `ProfileMemberCard.vue` | `openMemberCenter` |
+| `会员权益` / `会员中心` / `成长任务` | `member-center/index.vue` | 核對會員中心 |
 
 ### 12.5 VM / setupState 方法對照
 
@@ -336,6 +362,12 @@ QA 透過 `pageEval` / `__pageSetup` 呼叫小程序實例方法，避開不穩�
 | `toggleAll` / `checkedSet` / `purchasableItems` | `CartTab.vue` | `selectCartGoods` | 全選可購商品 |
 | `checkout` | `CartTab.vue` | `callCartCheckout` | 建訂單並進結算頁 |
 | `syncCheckedToStorage` / `refreshCartTotal` | `CartTab.vue` | 勾選後同步 | 與 UI 底欄總價對齊 |
+| `closeFirstOrderTip` / `submitOrder` | `settlement/index.vue` | `prepareSettlement`、`clickSettlementPay` | 關首單提示、提交訂單 |
+| `onTimeConfirm` / `timePickerRef.getFirstAvailable` | 結算頁 + `TimePickerPopup.vue` | `prepareSettlement` | 寫入自提時間 |
+| `confirmOrderPaySuccess` | `settlement/index.vue` | `confirmPaySuccessFallback` | mock 支付後補償跳轉成功頁 |
+| `viewOrder` | `payment-success/index.vue` | `viewOrderAfterPay` | 進訂單詳情或列表 |
+| `backToOrderList` / `switchTab` / `goToOrderDetail` | `order-list` / `order-detail` | `verifyOrderList` | 列表切 Tab、打開訂單 |
+| `handleTabChange('profile')` | `pages/index/index.vue` | `openMemberCenter` | 切到「我的」 |
 
 ### 12.6 Storage 鍵
 
@@ -350,6 +382,8 @@ QA 會清、寫或讀的鍵，與小程序 `uni.setStorageSync` 對齊：
 | `selectedStoreId` / `selectedStoreName` / `selectedStore` | `goToOrder` / `persistSelectedStore` | 當前門店 |
 | `cartCheckedItems` | `CartTab.syncCheckedToStorage` | 購物車勾選 |
 
+結算若 storage 沒有合法手機號，QA 會把 `buyerPhone` 設成 `config.qaPhone`（預設 `13800138000`）。
+
 `openLogin` 會清 token 與選店相關鍵，避免沿用上一輪會話。
 
 ### 12.7 外部 API
@@ -358,8 +392,10 @@ QA 會清、寫或讀的鍵，與小程序 `uni.setStorageSync` 對齊：
 |------|----------|------|
 | `POST {qaApi}/api/auth/wechat/login` | 小程序登入；失敗時 `callWxMethod("request")` 補登 | `wechatLogin` / `retryWechatLogin` |
 | `GET {qaApi}/api/products/mini/carts` | `fetchCartFromApi` | 核對購物車有貨後再點結算 |
+| 建立迷你訂單 / 支付單 | 小程序 `createMiniOrder`、`createPaymentOrder` | `submitOrder` |
+| 標訂單已支付 | 小程序 `markMiniOrderPaySuccess` | `confirmOrderPaySuccess` |
 
-`qaApi` 預設 `https://peterson-gw-qa.weprogram.site`。購物車下單本身由小程序 `createCartOrder` 完成，QA 只負責勾選並觸發 `checkout()`。
+`qaApi` 預設 `https://peterson-gw-qa.weprogram.site`。購物車下單本身由小程序 `createCartOrder` 完成；結算支付由 `submitOrder` 完成。開發者工具內 `wx.requestPayment` 為 mock。
 
 ### 12.8 步驟 × 頁面速查
 
@@ -369,6 +405,11 @@ flowchart LR
   S --> P["pages/index/index?tab=products"]
   P --> C["pages/index/index?tab=cart"]
   C --> T[pages/settlement/index]
+  T --> Pay[pages/payment-success/index]
+  Pay --> D[pages/order-detail/index]
+  D --> O[pages/order-list/index]
+  O --> Me["pages/index/index?tab=profile"]
+  Me --> M[pages/member-center/index]
   S -.搜尋.-> Q[pages/store-search/index]
   Q --> P
 ```
@@ -380,3 +421,6 @@ flowchart LR
 | 8–9 選澳門直營店 | `pages/store-list/index`（可進 search） | `store-list-item` |
 | 10 加購 | `pages/index/index` products | `products-tab`、`product-purchase-popup` |
 | 11–12 購物車到結算 | `pages/index/index` cart → `pages/settlement/index` | `cart-tab`、`cart-summary-bar` |
+| 13–14 支付到成功頁 | `settlement` → `payment-success` | `.submit-btn`、mock `requestPayment` |
+| 15–16 訂單詳情 / 列表 | `order-detail`、`order-list` | `.order-card` |
+| 17 會員中心 | `index?tab=profile` → `member-center` | `profile-member-card` |

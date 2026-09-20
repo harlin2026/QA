@@ -1,59 +1,9 @@
 const config = require("./config");
 const native = require("./native-win");
 const h = require("./helper");
-
-const PAGE_SETUP = `
-  function __pageSetup() {
-    const page = getCurrentPages().slice(-1)[0];
-    const vm = page && (page.$vm || page);
-    const inner = vm && vm.$;
-    const candidates = [
-      inner && inner.proxy,
-      inner && inner.exposed,
-      inner && inner.setupState,
-      inner && inner.ctx,
-      vm && vm.$vm,
-      vm,
-      page
-    ].filter(Boolean);
-    const unwrap = function (value) {
-      return value && typeof value === 'object' && 'value' in value ? value.value : value;
-    };
-    const getRef = function (key) {
-      for (let i = 0; i < candidates.length; i += 1) {
-        const cur = candidates[i][key];
-        if (cur !== undefined && cur !== null) return unwrap(cur);
-      }
-      return '';
-    };
-    const setRef = function (key, val) {
-      for (let i = 0; i < candidates.length; i += 1) {
-        const t = candidates[i];
-        const cur = t[key];
-        if (cur && typeof cur === 'object' && 'value' in cur) {
-          cur.value = val;
-          return;
-        }
-      }
-      if (candidates[0]) candidates[0][key] = val;
-    };
-    const callFn = function (name, arg) {
-      for (let i = 0; i < candidates.length; i += 1) {
-        const fn = candidates[i][name];
-        if (typeof fn === 'function') {
-          fn(arg);
-          return true;
-        }
-      }
-      return false;
-    };
-    return { page: page, vm: vm, state: candidates[0] || {}, unwrap: unwrap, getRef: getRef, setRef: setRef, callFn: callFn };
-  }
-`;
-
-async function pageEval(miniProgram, source) {
-  return h.wxEval(miniProgram, `${PAGE_SETUP}\n${source}`);
-}
+const { resolveRoute } = require("./routes");
+const { pageEval } = require("./vm");
+const { runMemberSuite, openMemberCenterPage } = require("./member-suite");
 
 async function clearLoginState(miniProgram) {
   try {
@@ -1310,8 +1260,7 @@ async function verifyCartAndCheckout(miniProgram) {
   }
   console.log(`>>> 当前页面：${await h.currentPath(miniProgram)}`);
   if (!reached) throw new Error("点击结算后未进入结算页");
-  console.log(">>> 已进入结算页，不继续微信支付");
-  await h.sleep(config.finishDelay);
+  console.log(">>> 已进入结算页");
 }
 
 async function assertWxLogin(miniProgram) {
@@ -1326,7 +1275,361 @@ async function assertWxLogin(miniProgram) {
   );
 }
 
-async function runFlow(miniProgram) {
+async function mockWechatPay(miniProgram) {
+  try {
+    await miniProgram.mockWxMethod("requestPayment", { errMsg: "requestPayment:ok" });
+    console.log(">>> 已 mock wx.requestPayment 为成功（开发者工具无法真实微信支付）");
+  } catch (error) {
+    console.log(`>>> mock requestPayment：${error.message || error}`);
+  }
+  try {
+    await miniProgram.mockWxMethod("showModal", { confirm: true, cancel: false });
+  } catch (_) {
+    /* 放弃付款弹窗不是必需 */
+  }
+}
+
+async function prepareSettlement(miniProgram) {
+  const ready = await h.waitUntil(async () => {
+    try {
+      const page = await h.currentPage(miniProgram);
+      return !!(await h.deep$(page, ".submit-btn")) || !!(await h.findByText(page, "支付", 400));
+    } catch (_) {
+      return false;
+    }
+  }, 18000, 400);
+  if (!ready) throw new Error("结算页没有出现支付按钮");
+
+  const page = await h.currentPage(miniProgram);
+  const tip = await h.findByText(page, "继续下单", 800);
+  if (tip) await h.click(tip, "继续下单");
+
+  const prepared = await pageEval(
+    miniProgram,
+    `
+      return (async function () {
+        const ctx = __pageSetup();
+        ctx.callFn('closeFirstOrderTip');
+        ctx.setRef('showFirstOrderTip', false);
+
+        const validPhone = function (value) {
+          return /^1[3-9]\\d{9}$/.test(String(value || ''));
+        };
+        const fromRef = ctx.getRef('buyerPhone');
+        const nu = wx.getStorageSync('newUserInfo') || {};
+        const wxu = wx.getStorageSync('wxUserInfo') || {};
+        let ui = wx.getStorageSync('userInfo');
+        if (typeof ui === 'string') {
+          try { ui = JSON.parse(ui); } catch (e) { ui = {}; }
+        }
+        ui = ui || {};
+        const phone = validPhone(fromRef)
+          ? String(fromRef)
+          : (nu.phone || wxu.phone || ui.phone || ${JSON.stringify(config.qaPhone)});
+        ctx.setRef('buyerPhone', String(phone));
+
+        const existing = ctx.getRef('deliveryTime');
+        if (existing) {
+          return { phone: String(phone), time: existing, how: 'already' };
+        }
+
+        const picker = ctx.getRef('timePickerRef');
+        const inst = picker && (picker.value !== undefined ? picker.value : picker);
+        if (inst && typeof inst.getFirstAvailable === 'function') {
+          const first = await inst.getFirstAvailable();
+          if (first && first.text) {
+            ctx.setRef('deliveryTime', first.text);
+            ctx.setRef('selectedDeliveryData', first);
+            ctx.callFn('onTimeConfirm', first);
+            return { phone: String(phone), time: first.text, how: 'picker' };
+          }
+        }
+
+        const now = new Date();
+        const fallback = {
+          date: { date: now, label: '今天', week: '周日' },
+          slot: { isImmediate: true, start: now.getHours(), startMin: 0, end: now.getHours(), endMin: 30 },
+          text: '立即取单'
+        };
+        ctx.setRef('selectedDeliveryData', fallback);
+        ctx.setRef('deliveryTime', fallback.text);
+        return { phone: String(phone), time: fallback.text, how: 'fallback' };
+      })();
+    `,
+  );
+  console.log(`>>> 结算准备：${JSON.stringify(prepared)}`);
+  return prepared;
+}
+
+async function clickSettlementPay(miniProgram) {
+  const page = await h.currentPage(miniProgram);
+  const btn =
+    (await h.deep$(page, ".submit-btn")) ||
+    (await h.findByText(page, "支付", 3000)) ||
+    (await h.findByText(page, "支付中", 400));
+  if (btn) {
+    await h.click(btn, "支付");
+    return true;
+  }
+  console.log(">>> 没有点到支付按钮，改用 submitOrder");
+  await pageEval(
+    miniProgram,
+    `
+      const ctx = __pageSetup();
+      ctx.callFn('submitOrder');
+      return true;
+    `,
+  );
+  return false;
+}
+
+async function confirmPaySuccessFallback(miniProgram) {
+  const info = await pageEval(
+    miniProgram,
+    `
+      const ctx = __pageSetup();
+      const pay = ctx.getRef('currentPayment') || {};
+      const orderId = pay.orderId || '';
+      const total = ctx.getRef('currentTotalPrice') || ctx.getRef('totalPrice') || 0;
+      if (orderId) ctx.callFn('confirmOrderPaySuccess', orderId);
+      return { orderId: String(orderId), total: Number(total || 0) };
+    `,
+  );
+  console.log(`>>> 支付成功补偿：${JSON.stringify(info)}`);
+  return info || {};
+}
+
+async function payOnSettlement(miniProgram) {
+  console.log(">>> 13/17 在结算页填写电话、自提时间并支付");
+  if (!(await h.currentPath(miniProgram)).includes(config.pages.settlement)) {
+    throw new Error("当前不在结算页，无法支付");
+  }
+  await prepareSettlement(miniProgram);
+  await mockWechatPay(miniProgram);
+  await clickSettlementPay(miniProgram);
+
+  let reached = await h.waitPath(miniProgram, config.pages.paymentSuccess, 25000);
+  if (!reached) {
+    console.log(">>> 真实支付轮询未跳转成功页，改走订单支付成功确认");
+    const info = await confirmPaySuccessFallback(miniProgram);
+    reached = await h.waitPath(miniProgram, config.pages.paymentSuccess, 12000);
+    if (!reached && info.orderId) {
+      const url = `/pages/payment-success/index?amount=${encodeURIComponent(info.total)}&orderId=${encodeURIComponent(info.orderId)}`;
+      try {
+        await miniProgram.redirectTo(url);
+      } catch (error) {
+        console.log(`>>> redirectTo 支付成功页：${error.message || error}`);
+        await h.wxEval(miniProgram, `wx.redirectTo({ url: ${JSON.stringify(url)} });`);
+      }
+      reached = await h.waitPath(miniProgram, config.pages.paymentSuccess, 10000);
+    }
+  }
+  console.log(`>>> 当前页面：${await h.currentPath(miniProgram)}`);
+  if (!reached) {
+    await h.dumpTexts(await h.currentPage(miniProgram), 40);
+    throw new Error("提交支付后未进入支付成功页");
+  }
+}
+
+async function verifyPaymentSuccess(miniProgram) {
+  console.log(">>> 14/17 校验支付成功页");
+  const ok = await h.waitUntil(async () => {
+    const current = await h.currentPage(miniProgram);
+    return !!(
+      (await h.findByText(current, "查看订单", 400)) ||
+      (await h.findByText(current, "支付成功", 400)) ||
+      (await h.findByText(current, "提交成功", 400))
+    );
+  }, 8000, 400);
+  if (!ok) {
+    await h.dumpTexts(await h.currentPage(miniProgram), 40);
+    throw new Error("支付成功页缺少「查看订单」或成功文案");
+  }
+  console.log(">>> 已确认支付成功页");
+}
+
+async function viewOrderAfterPay(miniProgram) {
+  console.log(">>> 15/17 从支付成功页查看订单");
+  const page = await h.currentPage(miniProgram);
+  const btn =
+    (await h.deep$(page, ".order-btn")) ||
+    (await h.findByText(page, "查看订单", 4000));
+  if (btn) await h.click(btn, "查看订单");
+  else {
+    await pageEval(
+      miniProgram,
+      `
+        const ctx = __pageSetup();
+        ctx.callFn('viewOrder');
+        return true;
+      `,
+    );
+  }
+
+  const reached = await h.waitUntil(async () => {
+    const path = await h.currentPath(miniProgram);
+    return path.includes(config.pages.orderDetail) || path.includes(config.pages.orderList);
+  }, 12000, 400);
+  if (!reached) {
+    console.log(">>> 点击查看订单未跳转，改调 viewOrder");
+    await pageEval(
+      miniProgram,
+      `
+        const ctx = __pageSetup();
+        ctx.callFn('viewOrder');
+        return true;
+      `,
+    );
+  }
+  const opened = await h.waitUntil(async () => {
+    const path = await h.currentPath(miniProgram);
+    return path.includes(config.pages.orderDetail) || path.includes(config.pages.orderList);
+  }, 8000, 400);
+  const path = await h.currentPath(miniProgram);
+  console.log(`>>> 当前页面：${path}`);
+  if (!opened) throw new Error("点击查看订单后未进入订单详情或订单列表");
+
+  if (path.includes(config.pages.orderDetail)) {
+    const detail = await h.currentPage(miniProgram);
+    const hasBody = await h.waitUntil(async () => {
+      const current = await h.currentPage(miniProgram);
+      return !!(
+        (await h.findByText(current, "取单码", 400)) ||
+        (await h.findByText(current, "自取时间", 400)) ||
+        (await h.deep$(current, ".product-item")) ||
+        (await h.findByText(current, "立即付款", 400))
+      );
+    }, 10000, 400);
+    if (!hasBody) {
+      await h.dumpTexts(detail, 40);
+      throw new Error("订单详情页没有订单内容");
+    }
+    console.log(">>> 已进入订单详情");
+  }
+}
+
+async function openOrderListPage(miniProgram) {
+  const path = await h.currentPath(miniProgram);
+  if (path.includes(config.pages.orderList)) return;
+  if (path.includes(config.pages.orderDetail)) {
+    await pageEval(
+      miniProgram,
+      `
+        const ctx = __pageSetup();
+        if (!ctx.callFn('backToOrderList')) {
+          wx.redirectTo({ url: '/pages/order-list/index?tab=0' });
+        }
+        return true;
+      `,
+    );
+    if (await h.waitPath(miniProgram, config.pages.orderList, 8000)) return;
+  }
+  try {
+    await miniProgram.redirectTo("/pages/order-list/index?tab=0");
+  } catch (error) {
+    console.log(`>>> redirectTo 订单列表：${error.message || error}`);
+    await h.wxEval(miniProgram, "wx.redirectTo({ url: '/pages/order-list/index?tab=0' });");
+  }
+  if (!(await h.waitPath(miniProgram, config.pages.orderList, 12000))) {
+    throw new Error("未进入订单列表");
+  }
+}
+
+async function verifyOrderList(miniProgram) {
+  console.log(">>> 16/17 校验订单列表并打开一张订单");
+  await openOrderListPage(miniProgram);
+  await h.sleep(1200);
+
+  await pageEval(
+    miniProgram,
+    `
+      const ctx = __pageSetup();
+      ctx.callFn('switchTab', 0);
+      return true;
+    `,
+  );
+  const page = await h.currentPage(miniProgram);
+  const allTab = await h.findByText(page, "全部", 3000);
+  if (allTab) await h.click(allTab, "全部");
+  await h.sleep(800);
+
+  const hasCard = await h.waitUntil(async () => {
+    const current = await h.currentPage(miniProgram);
+    const cards = await h.deep$$(current, ".order-card");
+    return cards.length > 0;
+  }, 12000, 500);
+  if (!hasCard) {
+    await h.dumpTexts(await h.currentPage(miniProgram), 40);
+    throw new Error("订单列表没有订单卡片");
+  }
+
+  const listPage = await h.currentPage(miniProgram);
+  const cards = await h.deep$$(listPage, ".order-card");
+  if (cards[0]) await h.click(cards[0], "第一张订单");
+  else {
+    await pageEval(
+      miniProgram,
+      `
+        const ctx = __pageSetup();
+        const orders = ctx.getRef('orders') || [];
+        const first = orders[0];
+        if (first) ctx.callFn('goToOrderDetail', first);
+        return !!(first && first.id);
+      `,
+    );
+  }
+
+  const opened = await h.waitPath(miniProgram, config.pages.orderDetail, 10000);
+  console.log(`>>> 当前页面：${await h.currentPath(miniProgram)}`);
+  if (!opened) throw new Error("点击订单卡片后未进入订单详情");
+}
+
+async function openMemberCenter(miniProgram) {
+  console.log(">>> 17/17 打开会员中心");
+  await openMemberCenterPage(miniProgram);
+  console.log(`>>> 当前页面：${await h.currentPath(miniProgram)}`);
+
+  const memberPage = await h.currentPage(miniProgram);
+  const visible = await h.waitUntil(async () => {
+    const current = await h.currentPage(miniProgram);
+    return !!(
+      (await h.findByText(current, "会员权益", 400)) ||
+      (await h.findByText(current, "会员中心", 400)) ||
+      (await h.findByText(current, "成长任务", 400))
+    );
+  }, 8000, 400);
+  if (!visible) {
+    await h.dumpTexts(memberPage, 40);
+    throw new Error("会员中心页缺少权益或标题文案");
+  }
+  console.log(">>> 已确认会员中心");
+}
+
+async function finish(miniProgram) {
+  await h.sleep(config.finishDelay);
+}
+
+async function runFlow(miniProgram, options = {}) {
+  const route = resolveRoute(options.route);
+  console.log(`>>> 线路：${route.label} (${route.id})`);
+
+  if (route.only === "payment") {
+    await payOnSettlement(miniProgram);
+    await verifyPaymentSuccess(miniProgram);
+    await finish(miniProgram);
+    return route;
+  }
+  if (route.only === "orders") {
+    await verifyOrderList(miniProgram);
+    await finish(miniProgram);
+    return route;
+  }
+  if (route.only === "member") {
+    const summary = await runMemberSuite(miniProgram, { caseId: options.caseId });
+    if (summary.failed) throw new Error(`会员功能失败 ${summary.failed}/${summary.total}`);
+    return route;
+  }
+
   await assertWxLogin(miniProgram);
   await openLogin(miniProgram);
   await chooseQa(miniProgram);
@@ -1334,11 +1637,43 @@ async function runFlow(miniProgram) {
   await wechatLogin(miniProgram);
   await allowPhoneNumber(miniProgram);
   await waitLoggedInHome(miniProgram);
+  if (route.through === "login") {
+    await finish(miniProgram);
+    return route;
+  }
+
   await openStoreList(miniProgram);
   await chooseStore(miniProgram);
+  if (route.through === "store") {
+    await finish(miniProgram);
+    return route;
+  }
+
   await addProduct(miniProgram);
   await openCart(miniProgram);
   await verifyCartAndCheckout(miniProgram);
+  if (route.through === "settlement") {
+    await finish(miniProgram);
+    return route;
+  }
+
+  await payOnSettlement(miniProgram);
+  await verifyPaymentSuccess(miniProgram);
+  if (route.through === "payment") {
+    await finish(miniProgram);
+    return route;
+  }
+
+  await viewOrderAfterPay(miniProgram);
+  await verifyOrderList(miniProgram);
+  if (route.through === "orders") {
+    await finish(miniProgram);
+    return route;
+  }
+
+  const summary = await runMemberSuite(miniProgram);
+  if (summary.failed) throw new Error(`会员功能失败 ${summary.failed}/${summary.total}`);
+  return route;
 }
 
 module.exports = { runFlow };

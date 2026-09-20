@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>aChill QA 控制台</title>
+  <style>
+    :root {
+      --bg: #0f1115;
+      --panel: #171a21;
+      --panel-2: #1d222c;
+      --line: #2b3240;
+      --text: #e8edf5;
+      --muted: #8b95a7;
+      --accent: #3d8bfd;
+      --ok: #3dd68c;
+      --warn: #f5c84c;
+      --bad: #ff6b7a;
+      --log: #0b0d11;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font: 14px/1.45 "Segoe UI", "PingFang TC", "Microsoft JhengHei", sans-serif; }
+    body { display: grid; grid-template-rows: 56px 1fr; }
+    header { display: flex; align-items: center; justify-content: space-between; padding: 0 20px; border-bottom: 1px solid var(--line); background: var(--panel); }
+    h1 { margin: 0; font-size: 16px; font-weight: 600; }
+    .sub { color: var(--muted); font-size: 12px; margin-left: 10px; }
+    .status { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 12px; }
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+    .dot.run { background: var(--warn); }
+    .dot.ok { background: var(--ok); }
+    .dot.bad { background: var(--bad); }
+    header .ghost {
+      height: 32px; padding: 0 12px; border-radius: 8px; border: 1px solid var(--line);
+      background: transparent; color: var(--text); cursor: pointer; font-weight: 600;
+    }
+    header .ghost:disabled { opacity: 0.4; cursor: not-allowed; }
+    main { display: grid; grid-template-columns: 440px 1fr; min-height: 0; }
+    .tree-panel { border-right: 1px solid var(--line); background: var(--panel); min-width: 0; min-height: 0; }
+    #tree { height: 100%; overflow: auto; padding: 12px 10px 16px; }
+    .group { margin-bottom: 8px; }
+    .group-head {
+      display: flex; align-items: center; justify-content: space-between;
+      width: 100%; text-align: left; background: transparent; border: 0; color: var(--text);
+      padding: 8px 8px; cursor: pointer; font-weight: 600; font-size: 13px;
+    }
+    .group-head span { color: var(--muted); font-weight: 500; font-size: 12px; }
+    .group-head .chev { display: inline-block; width: 12px; color: var(--muted); margin-right: 6px; }
+    .items { padding-left: 10px; }
+    .item {
+      display: grid; grid-template-columns: 1fr auto auto; gap: 8px; align-items: center;
+      width: 100%; text-align: left; background: transparent; border: 1px solid transparent;
+      color: var(--text); padding: 6px 8px; border-radius: 6px; margin-bottom: 2px;
+    }
+    .item:hover { background: var(--panel-2); }
+    .item.active { border-color: var(--accent); background: #1a2740; }
+    .item-main { min-width: 0; cursor: pointer; }
+    .item-label { display: block; font-size: 13px; }
+    .item-error { display: block; margin-top: 3px; font-size: 11px; color: var(--bad); }
+    .mark { font-size: 11px; font-weight: 700; white-space: nowrap; }
+    .mark.idle { color: var(--muted); }
+    .mark.running { color: var(--warn); }
+    .mark.pass { color: var(--ok); }
+    .mark.fail { color: var(--bad); }
+    .item-run {
+      height: 26px; padding: 0 10px; border-radius: 6px; border: 0;
+      background: var(--accent); color: #fff; font-size: 12px; font-weight: 600;
+      cursor: pointer; white-space: nowrap;
+    }
+    .item-run:disabled { opacity: 0.4; cursor: not-allowed; }
+    .console-wrap { display: grid; grid-template-rows: 44px 1fr; min-width: 0; min-height: 0; }
+    .console-bar { display: flex; align-items: center; justify-content: space-between; padding: 0 16px; border-bottom: 1px solid var(--line); color: var(--muted); font-size: 12px; }
+    .console-bar button { background: transparent; color: var(--muted); border: 1px solid var(--line); height: 28px; padding: 0 10px; border-radius: 6px; cursor: pointer; }
+    #log { margin: 0; padding: 14px 16px 24px; overflow: auto; background: var(--log); font: 12px/1.55 ui-monospace, "Cascadia Code", Consolas, monospace; white-space: pre-wrap; word-break: break-word; }
+    .line { color: #c9d4e5; }
+    .line.err { color: var(--bad); }
+    .line.ok { color: var(--ok); }
+    .line.step { color: #7eb6ff; }
+    .line.meta { color: var(--muted); }
+    .ts { color: #5d6778; margin-right: 8px; }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>aChill QA 控制台</h1>
+      <span class="sub">依功能選擇子項，結果直接標在測試項上</span>
+    </div>
+    <div class="status">
+      <span class="dot" id="dot"></span>
+      <span id="state">待命</span>
+      <button class="ghost" id="stopBtn">停止</button>
+    </div>
+  </header>
+  <main>
+    <section class="tree-panel">
+      <div id="tree"></div>
+    </section>
+    <section class="console-wrap">
+      <div class="console-bar">
+        <span id="routeLabel">未選擇</span>
+        <button id="clearBtn">清空日誌</button>
+      </div>
+      <pre id="log"></pre>
+    </section>
+  </main>
+  <script>
+    const treeEl = document.getElementById("tree");
+    const stopBtn = document.getElementById("stopBtn");
+    const clearBtn = document.getElementById("clearBtn");
+    const logEl = document.getElementById("log");
+    const stateEl = document.getElementById("state");
+    const dotEl = document.getElementById("dot");
+    const routeLabel = document.getElementById("routeLabel");
+
+    const MARK = { idle: "待測", running: "進行中", pass: "通過", fail: "失敗" };
+    let groups = [];
+    let selected = null;
+    let running = false;
+    let stickBottom = true;
+    const collapsed = {};
+
+    logEl.addEventListener("scroll", () => {
+      stickBottom = logEl.scrollTop + logEl.clientHeight >= logEl.scrollHeight - 24;
+    });
+
+    function findItem(id) {
+      for (const group of groups) {
+        const item = group.items.find((entry) => entry.id === id);
+        if (item) return item;
+      }
+      return null;
+    }
+
+    function groupStats(group) {
+      const total = group.items.length;
+      const passed = group.items.filter((item) => item.status === "pass").length;
+      const failed = group.items.filter((item) => item.status === "fail").length;
+      if (!failed && !passed) return total + " 項";
+      return passed + " 通過 / " + failed + " 失敗";
+    }
+
+    function renderTree() {
+      treeEl.textContent = "";
+      groups.forEach((group) => {
+        const wrap = document.createElement("div");
+        wrap.className = "group";
+        const head = document.createElement("button");
+        head.className = "group-head";
+        head.innerHTML = "<span><span class=\"chev\">" + (collapsed[group.id] ? "+" : "–") +
+          "</span>" + escapeHtml(group.label) + "</span><span>" + groupStats(group) + "</span>";
+        head.addEventListener("click", () => {
+          collapsed[group.id] = !collapsed[group.id];
+          renderTree();
+        });
+        wrap.appendChild(head);
+        if (!collapsed[group.id]) {
+          const list = document.createElement("div");
+          list.className = "items";
+          group.items.forEach((item) => {
+            const row = document.createElement("div");
+            row.className = "item" + (selected && selected.id === item.id ? " active" : "");
+            const main = document.createElement("div");
+            main.className = "item-main";
+            const error = item.error ? "<span class=\"item-error\">" + escapeHtml(item.error) + "</span>" : "";
+            main.innerHTML = "<span class=\"item-label\">" + escapeHtml(item.label) + "</span>" + error;
+            main.addEventListener("click", () => selectItem(item));
+            const mark = document.createElement("span");
+            mark.className = "mark " + (item.status || "idle");
+            mark.textContent = MARK[item.status] || "待測";
+            const runBtn = document.createElement("button");
+            runBtn.className = "item-run";
+            runBtn.textContent = "開始";
+            runBtn.disabled = running;
+            runBtn.addEventListener("click", (event) => {
+              event.stopPropagation();
+              start(item);
+            });
+            row.appendChild(main);
+            row.appendChild(mark);
+            row.appendChild(runBtn);
+            list.appendChild(row);
+          });
+          wrap.appendChild(list);
+        }
+        treeEl.appendChild(wrap);
+      });
+    }
+
+    function selectItem(item) {
+      selected = item;
+      routeLabel.textContent = item.label;
+      renderTree();
+    }
+
+    function setStatus(text, kind) {
+      stateEl.textContent = text;
+      dotEl.className = "dot" + (kind ? " " + kind : "");
+    }
+
+    function applyRunning(next, label) {
+      running = next;
+      stopBtn.disabled = !running;
+      if (running) setStatus("執行中" + (label ? " · " + label : ""), "run");
+      renderTree();
+    }
+
+    function resetForRun(target) {
+      groups.forEach((group) => {
+        group.items.forEach((item) => {
+          const same = item.id === target.id;
+          const casesWhenFull = target.id === "member" && item.kind === "case";
+          if (same || casesWhenFull) {
+            item.status = "idle";
+            item.error = "";
+            item.path = "";
+          }
+        });
+      });
+    }
+
+    function lineClass(event) {
+      const line = event.line || "";
+      if (event.stream === "stderr" || /Error|未进入|失败/.test(line)) return "line err";
+      if (/测试完成/.test(line)) return "line ok";
+      if (event.type === "start" || event.type === "end" || event.type === "status") return "line meta";
+      if (/^>>>/.test(line)) return "line step";
+      return "line";
+    }
+
+    function appendEvent(event) {
+      if (event.type === "cases" || event.type === "result" || event.type === "suite") return;
+      const row = document.createElement("div");
+      row.className = lineClass(event);
+      const time = new Date(event.at || Date.now());
+      const ts = String(time.getHours()).padStart(2, "0") + ":" +
+        String(time.getMinutes()).padStart(2, "0") + ":" +
+        String(time.getSeconds()).padStart(2, "0");
+      let text = event.line || "";
+      if (event.type === "start") text = "開始：" + event.label + " (" + event.route + (event.case ? " / " + event.case : "") + ")";
+      if (event.type === "end") text = event.ok ? "結束：成功" : "結束：失敗，exit " + event.code;
+      if (event.type === "status") text = event.running ? "日誌通道已連線，測試執行中" : "日誌通道已連線，待命";
+      row.innerHTML = "<span class=\"ts\">" + ts + "</span>" + escapeHtml(text);
+      logEl.appendChild(row);
+      if (stickBottom) logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    function escapeHtml(value) {
+      return String(value).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    }
+
+    async function loadTree() {
+      const res = await fetch("/api/tree");
+      const data = await res.json();
+      groups = data.groups || [];
+      const first = groups[0] && groups[0].items.find((item) => item.id === "member") || (groups[0] && groups[0].items[0]);
+      if (first) selected = first;
+      if (selected) routeLabel.textContent = selected.label;
+      stopBtn.disabled = !running;
+      renderTree();
+    }
+
+    async function start(item) {
+      if (!item || running) return;
+      selectItem(item);
+      resetForRun(item);
+      item.status = "running";
+      renderTree();
+      const res = await fetch("/api/run", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          route: item.run || item.id,
+          case: item.kind === "case" ? item.id : "",
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        item.status = "idle";
+        renderTree();
+        appendEvent({ type: "log", stream: "stderr", line: data.error || "無法開始", at: Date.now() });
+        return;
+      }
+      applyRunning(true, item.label);
+    }
+
+    async function stop() {
+      await fetch("/api/stop", { method: "POST" });
+    }
+
+    function connectLogs() {
+      const source = new EventSource("/api/logs");
+      source.onmessage = (msg) => {
+        const event = JSON.parse(msg.data);
+        if (event.type === "result" && event.item) {
+          const item = findItem(event.item.id);
+          if (item) {
+            item.status = event.item.status;
+            item.error = event.item.error || "";
+            item.path = event.item.path || "";
+            renderTree();
+          }
+        }
+        if (event.type === "start") {
+          applyRunning(true, event.label);
+          const item = findItem(event.case || event.route);
+          if (item) {
+            item.status = "running";
+            selectItem(item);
+          }
+        }
+        if (event.type === "end") {
+          applyRunning(false);
+          setStatus(event.ok ? "完成" : "失敗", event.ok ? "ok" : "bad");
+          const item = findItem(event.case || event.route);
+          if (item && item.kind === "route") {
+            item.status = event.ok ? "pass" : "fail";
+            if (!event.ok) item.error = "exit " + event.code;
+            renderTree();
+          }
+        }
+        if (event.type === "status") {
+          applyRunning(!!event.running, event.route);
+          if (!event.running && event.lastExit) {
+            setStatus(event.lastExit.code === 0 ? "完成" : "失敗", event.lastExit.code === 0 ? "ok" : "bad");
+          }
+        }
+        appendEvent(event);
+      };
+      source.onerror = () => {
+        if (source.readyState === EventSource.CLOSED) setStatus("日誌斷線", "bad");
+      };
+    }
+
+    stopBtn.addEventListener("click", stop);
+    clearBtn.addEventListener("click", () => { logEl.textContent = ""; });
+
+    loadTree().then(connectLogs).catch((error) => {
+      appendEvent({ type: "log", stream: "stderr", line: String(error), at: Date.now() });
+    });
+  </script>
+</body>
+</html>
