@@ -4,11 +4,13 @@ const path = require("path");
 const { spawn } = require("child_process");
 const { ROUTES, resolveRoute } = require("../src/routes");
 const { listMemberCases } = require("../src/member-suite");
+const { listCoverageCases } = require("../src/coverage-suite");
 const { buildCatalog } = require("../src/catalog");
+const { publicConfig, saveConfig } = require("../src/config");
 
 const root = path.resolve(__dirname, "..");
 const publicDir = path.join(__dirname, "public");
-const PORT = Number(process.env.QA_UI_PORT || 3780);
+const PORT = Number(process.env.QA_UI_PORT || publicConfig().tools.uiPort || 3780);
 
 const clients = new Set();
 const recent = [];
@@ -115,6 +117,9 @@ function startRun(routeId, caseId) {
   if (route.id === "member" || route.id === "member-only") {
     broadcast({ type: "cases", cases: listMemberCases(onlyCase || undefined), at: Date.now() });
   }
+  if (route.id === "coverage-only") {
+    broadcast({ type: "cases", cases: listCoverageCases(onlyCase || undefined), at: Date.now() });
+  }
 
   const args = [path.join(root, "run.js"), `--route=${route.id}`];
   if (onlyCase) args.push(`--case=${onlyCase}`);
@@ -216,7 +221,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (req.method === "GET" && url.pathname === "/api/cases") {
-    send(res, 200, { cases: listMemberCases() });
+    send(res, 200, { cases: [...listMemberCases(), ...listCoverageCases()] });
     return;
   }
 
@@ -238,6 +243,21 @@ const server = http.createServer(async (req, res) => {
     res.write(`data: ${JSON.stringify({ type: "status", running, route: currentRoute, case: currentCase, lastExit, at: Date.now() })}\n\n`);
     clients.add(res);
     req.on("close", () => clients.delete(res));
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/config") {
+    send(res, 200, publicConfig());
+    return;
+  }
+
+  if (req.method === "PUT" && url.pathname === "/api/config") {
+    try {
+      const body = await readBody(req);
+      send(res, 200, { ok: true, config: saveConfig(body) });
+    } catch (error) {
+      send(res, 400, { ok: false, error: error.message || String(error) });
+    }
     return;
   }
 

@@ -2,49 +2,13 @@ const config = require("./config");
 const h = require("./helper");
 const { pageEval } = require("./vm");
 const { emitCases, emitResult, emitSuite } = require("./reporter");
-
-const ERROR_TEXT = /页面不存在|页面错误|出错了|出错啦|系统错误|渲染错误|TypeError|Cannot read|undefined is not|未找到页面/;
-const HARD_ERROR = /渲染层错误|Uncaught|TypeError|ReferenceError|未找到页面|页面不存在/;
-
-function stringify(value) {
-  if (!value) return "";
-  if (typeof value === "string") return value;
-  if (value.message) return String(value.message);
-  if (value.text) return String(value.text);
-  try {
-    return JSON.stringify(value);
-  } catch (_) {
-    return String(value);
-  }
-}
-
-function attachWatch(miniProgram) {
-  const bucket = [];
-  const onException = (error) => {
-    const msg = stringify(error);
-    if (!msg) return;
-    bucket.push(msg);
-    console.log(`>>> 捕获异常：${msg.slice(0, 240)}`);
-  };
-  const onConsole = (msg) => {
-    const text = stringify(msg);
-    if (HARD_ERROR.test(text) || (msg && msg.type === "error" && HARD_ERROR.test(text))) {
-      bucket.push(text);
-    }
-  };
-  miniProgram.on("exception", onException);
-  miniProgram.on("console", onConsole);
-  return {
-    clear() {
-      bucket.length = 0;
-    },
-    drain() {
-      const items = bucket.slice();
-      bucket.length = 0;
-      return items.filter((item) => HARD_ERROR.test(item) || ERROR_TEXT.test(item));
-    },
-  };
-}
+const {
+  attachWatch,
+  installUiHooks,
+  drainUiLog,
+  scanPageErrors,
+  classifyUiLog,
+} = require("./watch");
 
 async function clickText(miniProgram, text, label = text) {
   const page = await h.currentPage(miniProgram);
@@ -53,23 +17,6 @@ async function clickText(miniProgram, text, label = text) {
     (await h.deep$(page, `.${label}`));
   if (!el) throw new Error(`找不到「${text}」`);
   await h.click(el, label);
-}
-
-async function scanPageErrors(miniProgram) {
-  try {
-    const page = await h.currentPage(miniProgram);
-    const nodes = await h.deep$$(page, "text");
-    const texts = [];
-    for (const node of nodes.slice(0, 40)) {
-      const value = await h.safeText(node);
-      if (value) texts.push(value);
-    }
-    const blob = texts.join(" ");
-    if (ERROR_TEXT.test(blob)) return [blob.slice(0, 180)];
-  } catch (error) {
-    return [error.message || String(error)];
-  }
-  return [];
 }
 
 async function ensureProfileTab(miniProgram) {
@@ -512,6 +459,7 @@ function listMemberCases(caseId) {
     id: item.id,
     group: item.group,
     name: item.name,
+    run: "member-only",
     status: "idle",
   }));
 }
@@ -524,6 +472,7 @@ async function runOne(miniProgram, watch, item) {
     status: "running",
   });
   watch.clear();
+  await drainUiLog(miniProgram);
   let status = "pass";
   let error = "";
   let path = "";
@@ -533,12 +482,16 @@ async function runOne(miniProgram, watch, item) {
     path = await h.currentPath(miniProgram);
     const pageErrors = await scanPageErrors(miniProgram);
     const hard = watch.drain();
+    const uiErrors = classifyUiLog(await drainUiLog(miniProgram), {
+      expectToast: item.expectToast,
+      ignoreToast: item.ignoreToast,
+    });
     if (item.expectPath && !path.includes(item.expectPath)) {
       status = "fail";
       error = `未进入 ${item.expectPath}，当前 ${path}`;
-    } else if (pageErrors.length || hard.length) {
+    } else if (pageErrors.length || hard.length || uiErrors.length) {
       status = "fail";
-      error = [...pageErrors, ...hard].join("；").slice(0, 240);
+      error = [...pageErrors, ...hard, ...uiErrors].join("；").slice(0, 240);
     }
   } catch (err) {
     status = "fail";
@@ -572,6 +525,7 @@ async function runMemberSuite(miniProgram, options = {}) {
   const cases = resolveCases(options.caseId);
   console.log(options.caseId ? `>>> 开始会员功能单项测试：${cases[0].name}` : ">>> 开始会员功能逐项测试");
   emitCases(listMemberCases(options.caseId));
+  await installUiHooks(miniProgram);
   const watch = attachWatch(miniProgram);
   let passed = 0;
   let failed = 0;

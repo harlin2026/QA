@@ -1,5 +1,6 @@
 const { ROUTES } = require("./routes");
 const { listMemberCases } = require("./member-suite");
+const { listCoverageCases } = require("./coverage-suite");
 
 function buildCatalog() {
   const e2eItems = ROUTES.filter((item) => !item.isolated).map((item) => ({
@@ -11,7 +12,7 @@ function buildCatalog() {
     status: "idle",
   }));
 
-  ROUTES.filter((item) => item.isolated && item.id !== "member-only").forEach((item) => {
+  ROUTES.filter((item) => item.isolated && item.id !== "member-only" && item.id !== "coverage-only").forEach((item) => {
     e2eItems.push({
       id: item.id,
       label: item.label,
@@ -31,13 +32,13 @@ function buildCatalog() {
   ];
 
   const byGroup = new Map();
-  listMemberCases().forEach((item) => {
+  [...listMemberCases(), ...listCoverageCases()].forEach((item) => {
     if (!byGroup.has(item.group)) byGroup.set(item.group, []);
     byGroup.get(item.group).push({
       id: item.id,
       label: item.name,
       summary: "",
-      run: "member-only",
+      run: item.run,
       kind: "case",
       status: item.status || "idle",
       error: "",

@@ -1,6 +1,23 @@
 {
-  "cliPath": "C:\\Program Files (x86)\\Tencent\\微信web开发者工具\\cli.bat",
-  "projectPath": "F:\\azure\\Peterson\\src\\Peterson.WechatMiniProgram\\PetersonWechatMiniProgram-vue3vite\\dist\\dev\\mp-weixin",
-  "test_port": 9420,
-  "finish_delay": 15
+  "tools": {
+    "cliPath": "C:\\Program Files (x86)\\Tencent\\微信web开发者工具\\cli.bat",
+    "projectPath": "F:\\azure\\Peterson\\src\\Peterson.WechatMiniProgram\\PetersonWechatMiniProgram-vue3vite\\dist\\dev\\mp-weixin",
+    "testPort": 9420,
+    "pythonPath": "",
+    "uiPort": 3780
+  },
+  "params": {
+    "qaApi": "https://peterson-gw-qa.weprogram.site",
+    "qaPhone": "13800138000",
+    "preferredStore": "aChill Club澳门直营店",
+    "preferredHints": [
+      "aChill Club澳门直营店",
+      "澳门直营店",
+      "澳門直營店",
+      "澳门直营",
+      "澳门",
+      "澳門"
+    ],
+    "finishDelay": 15
+  }
 }

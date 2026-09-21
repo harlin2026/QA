@@ -433,9 +433,11 @@ function clickGreenAllow(win, quiet = false) {
 }
 
 function runPythonAllow(timeout = 2500) {
+  const config = require("./config");
   const script = path.resolve(__dirname, "..", "tools", "click_allow.py");
+  const configured = String(config.pythonPath || "").trim();
   const venvPy = path.resolve(__dirname, "..", ".venv", "Scripts", "python.exe");
-  const py = fs.existsSync(venvPy) ? venvPy : "python";
+  const py = configured || (fs.existsSync(venvPy) ? venvPy : "python");
   if (!fs.existsSync(script)) {
     return { out: "", status: 1 };
   }

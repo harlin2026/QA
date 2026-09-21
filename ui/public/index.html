@@ -77,6 +77,33 @@
     .line.step { color: #7eb6ff; }
     .line.meta { color: var(--muted); }
     .ts { color: #5d6778; margin-right: 8px; }
+    .overlay {
+      position: fixed; inset: 0; background: rgba(0,0,0,0.45); display: none;
+      align-items: stretch; justify-content: flex-end; z-index: 20;
+    }
+    .overlay.open { display: flex; }
+    .sheet {
+      width: 420px; max-width: 100%; background: var(--panel); border-left: 1px solid var(--line);
+      display: grid; grid-template-rows: 56px 1fr 64px; min-height: 0;
+    }
+    .sheet-head, .sheet-foot {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 0 16px; border-bottom: 1px solid var(--line);
+    }
+    .sheet-foot { border-bottom: 0; border-top: 1px solid var(--line); gap: 8px; }
+    .sheet h2 { margin: 0; font-size: 15px; }
+    .sheet-body { overflow: auto; padding: 14px 16px 24px; }
+    .field { margin-bottom: 12px; }
+    .field label { display: block; color: var(--muted); font-size: 12px; margin-bottom: 4px; }
+    .field input, .field textarea {
+      width: 100%; background: var(--panel-2); color: var(--text); border: 1px solid var(--line);
+      border-radius: 6px; padding: 8px 10px; font: 13px/1.4 inherit;
+    }
+    .field textarea { min-height: 72px; resize: vertical; }
+    .hint { color: var(--muted); font-size: 11px; margin-top: 4px; }
+    .sheet-foot .primary, .sheet-foot .ghost { height: 36px; flex: 1; }
+    button.primary { background: var(--accent); color: #fff; border: 0; border-radius: 8px; cursor: pointer; font-weight: 600; }
+    button.ghost { background: transparent; color: var(--text); border: 1px solid var(--line); border-radius: 8px; cursor: pointer; font-weight: 600; }
   </style>
 </head>
 <body>
@@ -88,6 +115,7 @@
     <div class="status">
       <span class="dot" id="dot"></span>
       <span id="state">待命</span>
+      <button class="ghost" id="cfgBtn">設定</button>
       <button class="ghost" id="stopBtn">停止</button>
     </div>
   </header>
@@ -103,9 +131,48 @@
       <pre id="log"></pre>
     </section>
   </main>
+  <div class="overlay" id="cfgOverlay">
+    <div class="sheet">
+      <div class="sheet-head">
+        <h2>連接與參數</h2>
+        <button class="ghost" id="cfgClose" style="height:32px;padding:0 12px;">關閉</button>
+      </div>
+      <div class="sheet-body">
+        <div class="field"><label>微信開發者工具 CLI</label><input id="cfgCli" /></div>
+        <div class="field"><label>小程序專案路徑</label><input id="cfgProject" /></div>
+        <div class="field"><label>自動化端口</label><input id="cfgPort" /></div>
+        <div class="field">
+          <label>Python 路徑（點原生「允许」）</label>
+          <input id="cfgPython" placeholder="空白則用 .venv 或系統 python" />
+        </div>
+        <div class="field">
+          <label>控制台端口</label>
+          <input id="cfgUiPort" />
+          <div class="hint">改完需重啟 npm start 才生效</div>
+        </div>
+        <div class="field"><label>QA 後端</label><input id="cfgApi" /></div>
+        <div class="field"><label>QA 手機號</label><input id="cfgPhone" /></div>
+        <div class="field"><label>偏好門店</label><input id="cfgStore" /></div>
+        <div class="field">
+          <label>門店關鍵詞（逗號分隔）</label>
+          <textarea id="cfgHints"></textarea>
+        </div>
+        <div class="field"><label>結束停留秒數</label><input id="cfgDelay" /></div>
+      </div>
+      <div class="sheet-foot">
+        <button class="ghost" id="cfgCancel">取消</button>
+        <button class="primary" id="cfgSave">儲存</button>
+      </div>
+    </div>
+  </div>
   <script>
     const treeEl = document.getElementById("tree");
     const stopBtn = document.getElementById("stopBtn");
+    const cfgBtn = document.getElementById("cfgBtn");
+    const cfgOverlay = document.getElementById("cfgOverlay");
+    const cfgClose = document.getElementById("cfgClose");
+    const cfgCancel = document.getElementById("cfgCancel");
+    const cfgSave = document.getElementById("cfgSave");
     const clearBtn = document.getElementById("clearBtn");
     const logEl = document.getElementById("log");
     const stateEl = document.getElementById("state");
@@ -118,6 +185,17 @@
     let running = false;
     let stickBottom = true;
     const collapsed = {};
+
+    function isCollapsed(id) {
+      return id in collapsed ? collapsed[id] : true;
+    }
+
+    function expandGroupOf(item) {
+      if (!item) return;
+      groups.forEach((group) => {
+        if (group.items.some((entry) => entry.id === item.id)) collapsed[group.id] = false;
+      });
+    }
 
     logEl.addEventListener("scroll", () => {
       stickBottom = logEl.scrollTop + logEl.clientHeight >= logEl.scrollHeight - 24;
@@ -146,14 +224,14 @@
         wrap.className = "group";
         const head = document.createElement("button");
         head.className = "group-head";
-        head.innerHTML = "<span><span class=\"chev\">" + (collapsed[group.id] ? "+" : "–") +
+        head.innerHTML = "<span><span class=\"chev\">" + (isCollapsed(group.id) ? "+" : "–") +
           "</span>" + escapeHtml(group.label) + "</span><span>" + groupStats(group) + "</span>";
         head.addEventListener("click", () => {
-          collapsed[group.id] = !collapsed[group.id];
+          collapsed[group.id] = !isCollapsed(group.id);
           renderTree();
         });
         wrap.appendChild(head);
-        if (!collapsed[group.id]) {
+        if (!isCollapsed(group.id)) {
           const list = document.createElement("div");
           list.className = "items";
           group.items.forEach((item) => {
@@ -261,6 +339,7 @@
 
     async function start(item) {
       if (!item || running) return;
+      expandGroupOf(item);
       selectItem(item);
       resetForRun(item);
       item.status = "running";
@@ -305,6 +384,7 @@
           const item = findItem(event.case || event.route);
           if (item) {
             item.status = "running";
+            expandGroupOf(item);
             selectItem(item);
           }
         }
@@ -331,7 +411,74 @@
       };
     }
 
+    function fillConfig(data) {
+      const tools = data.tools || {};
+      const params = data.params || {};
+      document.getElementById("cfgCli").value = tools.cliPath || "";
+      document.getElementById("cfgProject").value = tools.projectPath || "";
+      document.getElementById("cfgPort").value = tools.testPort || "";
+      document.getElementById("cfgPython").value = tools.pythonPath || "";
+      document.getElementById("cfgUiPort").value = tools.uiPort || "";
+      document.getElementById("cfgApi").value = params.qaApi || "";
+      document.getElementById("cfgPhone").value = params.qaPhone || "";
+      document.getElementById("cfgStore").value = params.preferredStore || "";
+      document.getElementById("cfgHints").value = (params.preferredHints || []).join("，");
+      document.getElementById("cfgDelay").value = params.finishDelay || "";
+    }
+
+    async function openConfig() {
+      const res = await fetch("/api/config");
+      fillConfig(await res.json());
+      cfgOverlay.classList.add("open");
+    }
+
+    function closeConfig() {
+      cfgOverlay.classList.remove("open");
+    }
+
+    async function saveConfigForm() {
+      const body = {
+        tools: {
+          cliPath: document.getElementById("cfgCli").value.trim(),
+          projectPath: document.getElementById("cfgProject").value.trim(),
+          testPort: Number(document.getElementById("cfgPort").value),
+          pythonPath: document.getElementById("cfgPython").value.trim(),
+          uiPort: Number(document.getElementById("cfgUiPort").value),
+        },
+        params: {
+          qaApi: document.getElementById("cfgApi").value.trim(),
+          qaPhone: document.getElementById("cfgPhone").value.trim(),
+          preferredStore: document.getElementById("cfgStore").value.trim(),
+          preferredHints: document.getElementById("cfgHints").value,
+          finishDelay: Number(document.getElementById("cfgDelay").value),
+        },
+      };
+      const res = await fetch("/api/config", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        appendEvent({ type: "log", stream: "stderr", line: data.error || "無法儲存設定", at: Date.now() });
+        return;
+      }
+      closeConfig();
+      appendEvent({ type: "log", line: "已儲存連接與參數，下次開始測試即生效", at: Date.now() });
+    }
+
     stopBtn.addEventListener("click", stop);
+    cfgBtn.addEventListener("click", () => openConfig().catch((error) => {
+      appendEvent({ type: "log", stream: "stderr", line: String(error), at: Date.now() });
+    }));
+    cfgClose.addEventListener("click", closeConfig);
+    cfgCancel.addEventListener("click", closeConfig);
+    cfgSave.addEventListener("click", () => saveConfigForm().catch((error) => {
+      appendEvent({ type: "log", stream: "stderr", line: String(error), at: Date.now() });
+    }));
+    cfgOverlay.addEventListener("click", (event) => {
+      if (event.target === cfgOverlay) closeConfig();
+    });
     clearBtn.addEventListener("click", () => { logEl.textContent = ""; });
 
     loadTree().then(connectLogs).catch((error) => {

@@ -4,6 +4,7 @@ const h = require("./helper");
 const { resolveRoute } = require("./routes");
 const { pageEval } = require("./vm");
 const { runMemberSuite, openMemberCenterPage } = require("./member-suite");
+const { runCoverageSuite } = require("./coverage-suite");
 
 async function clearLoginState(miniProgram) {
   try {
@@ -1622,6 +1623,11 @@ async function runFlow(miniProgram, options = {}) {
   if (route.only === "orders") {
     await verifyOrderList(miniProgram);
     await finish(miniProgram);
+    return route;
+  }
+  if (route.only === "coverage") {
+    const summary = await runCoverageSuite(miniProgram, { caseId: options.caseId });
+    if (summary.failed) throw new Error(`覆盖测试失败 ${summary.failed}/${summary.total}`);
     return route;
   }
   if (route.only === "member") {

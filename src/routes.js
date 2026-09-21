@@ -57,6 +57,13 @@ const ROUTES = [
     summary: "從目前會話開始，逐項測「我的」與會員中心功能",
     isolated: true,
   },
+  {
+    id: "coverage-only",
+    label: "只測覆蓋項",
+    only: "coverage",
+    summary: "從目前會話開始，測未覆蓋頁面、加資料與報錯彈窗",
+    isolated: true,
+  },
 ];
 
 function resolveRoute(id) {
